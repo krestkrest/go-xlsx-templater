@@ -1,12 +1,14 @@
 package main
 
 import (
-	"github.com/ivahaev/go-xlsx-templater"
+	"github.com/krestkrest/go-xlsx-templater"
 )
 
 func main() {
 	doc := xlst.New()
-	doc.ReadTemplate("./template.xlsx")
+	if err := doc.ReadTemplate("./template.xlsx"); err != nil {
+		panic(err)
+	}
 	ctx := map[string]interface{}{
 		"name":           "Github User",
 		"nameHeader":     "Item name",
@@ -30,12 +32,11 @@ func main() {
 			},
 		},
 	}
-	err := doc.Render(ctx)
-	if err != nil {
+
+	if err := doc.Render(ctx); err != nil {
 		panic(err)
 	}
-	err = doc.Save("./report.xlsx")
-	if err != nil {
+	if err := doc.Save("./report.xlsx"); err != nil {
 		panic(err)
 	}
 }
