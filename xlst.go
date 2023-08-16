@@ -236,9 +236,7 @@ func cellModification(value string, ctx interface{}) (string, error) {
 		return value, nil
 	}
 
-	tpl := strings.Replace(value, "{{", "{{{", -1)
-	tpl = strings.Replace(tpl, "}}", "}}}", -1)
-	template, err := raymond.Parse(tpl)
+	template, err := raymond.Parse(value)
 	if err != nil {
 		return "", fmt.Errorf("raymond.Parse: %w", err)
 	}
