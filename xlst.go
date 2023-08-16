@@ -1,33 +1,36 @@
 package xlst
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/aymerick/raymond"
-	"github.com/tealeg/xlsx/v3"
+	xls "github.com/xuri/excelize/v2"
 )
 
+func init() {
+	raymond.RegisterHelper("inc", func(value string) interface{} {
+		intValue, err := strconv.Atoi(value)
+		if err != nil {
+			fmt.Printf("failed to inc %q: %v\n", value, err)
+		}
+		return strconv.Itoa(intValue + 1)
+	})
+}
+
 var (
-	rgx               = regexp.MustCompile(`\{\{\s*(\w+)\.\w+\s*\}\}`)
-	rangeRgx          = regexp.MustCompile(`\{\{\s*range\s+(\w+)\s*\}\}`)
-	rangeEndRgx       = regexp.MustCompile(`\{\{\s*end\s*\}\}`)
-	errBreakIteration = errors.New("break")
+	listRgx = regexp.MustCompile(`\{\{\s*(\w+)\.\w+\s*\}\}`)
 )
 
 // Xlst Represents template struct
 type Xlst struct {
-	file   *xlsx.File
-	report *xlsx.File
-}
-
-// Options for render has only one property WrapTextInAllCells for wrapping text
-type Options struct {
-	WrapTextInAllCells bool
+	file *xls.File
 }
 
 // New creates new Xlst struct and returns pointer to it
@@ -37,7 +40,7 @@ func New() *Xlst {
 
 // NewFromBinary creates new Xlst struct puts binary tempate into and returns pointer to it
 func NewFromBinary(content []byte) (*Xlst, error) {
-	file, err := xlsx.OpenBinary(content)
+	file, err := xls.OpenReader(bytes.NewReader(content))
 	if err != nil {
 		return nil, err
 	}
@@ -48,48 +51,20 @@ func NewFromBinary(content []byte) (*Xlst, error) {
 
 // Render renders report and stores it in a struct
 func (m *Xlst) Render(in interface{}) error {
-	return m.RenderWithOptions(in, nil)
-}
-
-// RenderWithOptions renders report with options provided and stores it in a struct
-func (m *Xlst) RenderWithOptions(in interface{}, options *Options) error {
-	if options == nil {
-		options = new(Options)
-	}
-	report := xlsx.NewFile()
-	for si, sheet := range m.file.Sheets {
-		ctx := getCtx(in, si)
-		newSheet, err := report.AddSheet(sheet.Name)
-		if err != nil {
-			return fmt.Errorf("report.AddSheet: %w", err)
+	ctx := getCtx(in)
+	for _, sheet := range m.file.GetSheetList() {
+		if err := m.renderRows(ctx, sheet); err != nil {
+			return fmt.Errorf("renderRows(%s): %w", sheet, err)
 		}
-		cloneSheet(sheet, newSheet)
-
-		var rows []*xlsx.Row
-		_ = sheet.ForEachRow(func(r *xlsx.Row) error {
-			rows = append(rows, r)
-			return nil
-		}, xlsx.SkipEmptyRows)
-
-		err = renderRows(newSheet, rows, ctx, options)
-		if err != nil {
-			return err
-		}
-
-		sheet.Cols.ForEach(func(_ int, col *xlsx.Col) {
-			report.Sheets[si].Cols.Add(col)
-		})
 	}
-	m.report = report
-
 	return nil
 }
 
 // ReadTemplate reads template from disk and stores it in a struct
 func (m *Xlst) ReadTemplate(path string) error {
-	file, err := xlsx.OpenFile(path)
+	file, err := xls.OpenFile(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("xls.OpenFile: %w", err)
 	}
 	m.file = file
 	return nil
@@ -97,195 +72,188 @@ func (m *Xlst) ReadTemplate(path string) error {
 
 // Save saves generated report to disk
 func (m *Xlst) Save(path string) error {
-	if m.report == nil {
+	if m.file == nil {
 		return errors.New("report was not generated")
 	}
-	return m.report.Save(path)
+	return m.file.SaveAs(path)
 }
 
 // Write writes generated report to provided writer
 func (m *Xlst) Write(writer io.Writer) error {
-	if m.report == nil {
+	if m.file == nil {
 		return errors.New("report was not generated")
 	}
-	return m.report.Write(writer)
+	return m.file.Write(writer)
 }
 
-func renderRows(sheet *xlsx.Sheet, rows []*xlsx.Row, ctx map[string]interface{}, options *Options) error {
-	for ri := 0; ri < len(rows); ri++ {
-		row := rows[ri]
+func (m *Xlst) renderRows(ctx map[string]interface{}, sheet string) error {
+	rows, err := m.file.Rows(sheet)
+	if err != nil {
+		return fmt.Errorf("file.Rows: %w", err)
+	}
 
-		rangeProp := getRangeProp(row)
-		if rangeProp != "" {
-			ri++
+	modifications, err := collectModifications(ctx, rows)
+	if err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("collectModifications: %w", err)
+	}
+	_ = rows.Close()
 
-			rangeEndIndex := getRangeEndIndex(rows[ri:])
-			if rangeEndIndex == -1 {
-				return fmt.Errorf("end of range %q not found", rangeProp)
-			}
+	if err = m.modifyCells(sheet, modifications.CellModifications); err != nil {
+		return fmt.Errorf("modifyCells: %w", err)
+	}
 
-			rangeEndIndex += ri
-
-			rangeCtx := getRangeCtx(ctx, rangeProp)
-			if rangeCtx == nil {
-				return fmt.Errorf("not expected context property for range %q", rangeProp)
-			}
-
-			for idx := range rangeCtx {
-				localCtx := mergeCtx(rangeCtx[idx], ctx)
-				err := renderRows(sheet, rows[ri:rangeEndIndex], localCtx, options)
-				if err != nil {
-					return err
-				}
-			}
-
-			ri = rangeEndIndex
-
-			continue
-		}
-
-		prop := getListProp(row)
-		if prop == "" {
-			newRow := sheet.AddRow()
-			cloneRow(row, newRow, options)
-			err := renderRow(newRow, ctx)
-			if err != nil {
-				return err
-			}
-			continue
-		}
-
-		if !isArray(ctx, prop) {
-			newRow := sheet.AddRow()
-			cloneRow(row, newRow, options)
-			err := renderRow(newRow, ctx)
-			if err != nil {
-				return err
-			}
-			continue
-		}
-
-		arr := reflect.ValueOf(ctx[prop])
-		arrBackup := ctx[prop]
-		for i := 0; i < arr.Len(); i++ {
-			newRow := sheet.AddRow()
-			cloneRow(row, newRow, options)
-			ctx[prop] = arr.Index(i).Interface()
-			err := renderRow(newRow, ctx)
-			if err != nil {
-				return err
-			}
-		}
-		ctx[prop] = arrBackup
+	if err = m.insertRows(sheet, modifications.RowInsertions); err != nil {
+		return fmt.Errorf("insertRows: %w", err)
 	}
 
 	return nil
 }
 
-func cloneCell(from, to *xlsx.Cell, options *Options) {
-	to.Value = from.Value
-	style := from.GetStyle()
-	if options.WrapTextInAllCells {
-		style.Alignment.WrapText = true
+func (m *Xlst) modifyCells(sheet string, cellModifications []*CellModification) error {
+	for _, cm := range cellModifications {
+		if err := m.modifyCell(sheet, cm.Column, cm.Row, cm.Value); err != nil {
+			return fmt.Errorf("modifyCell: %w", err)
+		}
 	}
-	to.SetStyle(style)
-	to.HMerge = from.HMerge
-	to.VMerge = from.VMerge
-	to.Hidden = from.Hidden
-	to.NumFmt = from.NumFmt
+	return nil
 }
 
-func cloneRow(from, to *xlsx.Row, options *Options) {
-	if from.GetHeight() != 0 {
-		to.SetHeight(from.GetHeight())
-	}
+func (m *Xlst) insertRows(sheet string, rowInsertions map[int][]*RowInsertion) error {
+	for row, list := range rowInsertions {
+		if len(list) == 0 {
+			continue
+		}
+		for i := 1; i < len(list); i++ {
+			if err := m.file.DuplicateRow(sheet, row); err != nil {
+				return fmt.Errorf("file.DuplicateRow(%d): %w", row, err)
+			}
+		}
 
-	_ = from.ForEachCell(func(cell *xlsx.Cell) error {
-		newCell := to.AddCell()
-		cloneCell(cell, newCell, options)
-		return nil
-	})
+		for i, ri := range list {
+			for _, cm := range ri.Columns {
+				if err := m.modifyCell(sheet, cm.Column, row+i, cm.Value); err != nil {
+					return fmt.Errorf("modifyCell: %w", err)
+				}
+			}
+		}
+	}
+	return nil
 }
 
-func renderCell(cell *xlsx.Cell, ctx interface{}) error {
-	tpl := strings.Replace(cell.Value, "{{", "{{{", -1)
+func (m *Xlst) modifyCell(sheet string, column, row int, value string) error {
+	cellName, err := xls.CoordinatesToCellName(column, row)
+	if err != nil {
+		return fmt.Errorf("xls.CoordinatesToCellName(%d, %d): %w", column, row, err)
+	}
+	if err = m.file.SetCellStr(sheet, cellName, value); err != nil {
+		return fmt.Errorf("SetCellStr(%s, %s): %w", cellName, value, err)
+	}
+	return nil
+}
+
+func collectModifications(ctx map[string]interface{}, rows *xls.Rows) (*Modifications, error) {
+	row := 0
+	result := NewModifications()
+
+	for rows.Next() {
+		row++
+
+		columns, err := rows.Columns()
+		if err != nil {
+			return nil, fmt.Errorf("rows.Columns: %w", err)
+		}
+
+		listProperty := getListProp(columns)
+		if listProperty == "" || !isArray(ctx, listProperty) {
+			for i, column := range columns {
+				if column == "" {
+					continue
+				}
+				if !strings.Contains(column, "{{") || !strings.Contains(column, "}}") {
+					continue
+				}
+
+				value, err := cellModification(column, ctx)
+				if err != nil {
+					return nil, fmt.Errorf("cellModification (%d, %d): %w", row, i+1, err)
+				}
+				result.AddCellModification(&CellModification{
+					Row: row,
+					ColumnModification: ColumnModification{
+						Column: i + 1,
+						Value:  value,
+					},
+				})
+			}
+			continue
+		}
+
+		modifiedRow := row + result.RowInsertionsTotal
+
+		arr := reflect.ValueOf(ctx[listProperty])
+		arrBackup := ctx[listProperty]
+		idxBackup := ctx["Index"]
+		for i := 0; i < arr.Len(); i++ {
+			ctx[listProperty] = arr.Index(i).Interface()
+			if idxBackup == nil {
+				ctx["Index"] = strconv.Itoa(i)
+			}
+
+			rowInsertion := &RowInsertion{}
+
+			for columnIndex, column := range columns {
+				if column == "" {
+					continue
+				}
+				if !strings.Contains(column, "{{") || !strings.Contains(column, "}}") {
+					continue
+				}
+
+				value, err := cellModification(column, ctx)
+				if err != nil {
+					return nil, fmt.Errorf("cellModification (%d, %d): %w", modifiedRow, columnIndex+1, err)
+				}
+				rowInsertion.Columns = append(rowInsertion.Columns, &ColumnModification{
+					Column: columnIndex + 1,
+					Value:  value,
+				})
+			}
+			result.AddRowInsertion(modifiedRow, rowInsertion)
+		}
+		ctx[listProperty] = arrBackup
+		ctx["Index"] = idxBackup
+	}
+
+	return result, nil
+}
+
+func cellModification(value string, ctx interface{}) (string, error) {
+	if value == "" {
+		return value, nil
+	}
+	if !strings.Contains(value, "{{") || !strings.Contains(value, "}}") {
+		return value, nil
+	}
+
+	tpl := strings.Replace(value, "{{", "{{{", -1)
 	tpl = strings.Replace(tpl, "}}", "}}}", -1)
 	template, err := raymond.Parse(tpl)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("raymond.Parse: %w", err)
 	}
 	out, err := template.Exec(ctx)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("template.Exec: %w", err)
 	}
-	cell.Value = out
-	return nil
+	return out, nil
 }
 
-func cloneSheet(from, to *xlsx.Sheet) {
-	to.MaxCol = from.MaxCol
-	//to.MaxRow = from.MaxRow
-	to.SheetFormat = from.SheetFormat
-
-	from.Cols.ForEach(func(_ int, col *xlsx.Col) {
-		newCol := xlsx.Col{
-			Min:          col.Min,
-			Max:          col.Max,
-			Hidden:       col.Hidden,
-			Width:        col.Width,
-			Collapsed:    col.Collapsed,
-			CustomWidth:  col.CustomWidth,
-			OutlineLevel: col.OutlineLevel,
-			BestFit:      col.BestFit,
-			Phonetic:     col.Phonetic,
-		}
-		newCol.SetStyle(col.GetStyle())
-
-		to.Cols.Add(&newCol)
-	})
-}
-
-func getCtx(in interface{}, i int) map[string]interface{} {
+func getCtx(in interface{}) map[string]interface{} {
 	if ctx, ok := in.(map[string]interface{}); ok {
 		return ctx
 	}
-	if ctxSlice, ok := in.([]interface{}); ok {
-		if len(ctxSlice) > i {
-			_ctx := ctxSlice[i]
-			if ctx, ok := _ctx.(map[string]interface{}); ok {
-				return ctx
-			}
-		}
-		return nil
-	}
 	return nil
-}
-
-func getRangeCtx(ctx map[string]interface{}, prop string) []map[string]interface{} {
-	val, ok := ctx[prop]
-	if !ok {
-		return nil
-	}
-
-	if propCtx, ok := val.([]map[string]interface{}); ok {
-		return propCtx
-	}
-
-	return nil
-}
-
-func mergeCtx(local, global map[string]interface{}) map[string]interface{} {
-	ctx := make(map[string]interface{})
-
-	for k, v := range global {
-		ctx[k] = v
-	}
-
-	for k, v := range local {
-		ctx[k] = v
-	}
-
-	return ctx
 }
 
 func isArray(in map[string]interface{}, prop string) bool {
@@ -300,53 +268,11 @@ func isArray(in map[string]interface{}, prop string) bool {
 	return false
 }
 
-func getListProp(in *xlsx.Row) string {
-	var match string
-	_ = in.ForEachCell(func(cell *xlsx.Cell) error {
-		if cell.Value != "" {
-			if found := rgx.FindAllStringSubmatch(cell.Value, -1); found != nil {
-				match = found[0][1]
-				return errBreakIteration
-			}
-		}
-		return nil
-	})
-	return match
-}
-
-func getRangeProp(in *xlsx.Row) string {
-	if cell := in.GetCell(0); cell != nil {
-		match := rangeRgx.FindAllStringSubmatch(cell.Value, -1)
-		if match != nil {
+func getListProp(columns []string) string {
+	for _, column := range columns {
+		if match := listRgx.FindAllStringSubmatch(column, -1); match != nil {
 			return match[0][1]
 		}
 	}
-
 	return ""
-}
-
-func getRangeEndIndex(rows []*xlsx.Row) int {
-	var nesting int
-	for idx := 0; idx < len(rows); idx++ {
-		if rangeEndRgx.MatchString(rows[idx].GetCell(0).Value) {
-			if nesting == 0 {
-				return idx
-			}
-
-			nesting--
-			continue
-		}
-
-		if rangeRgx.MatchString(rows[idx].GetCell(0).Value) {
-			nesting++
-		}
-	}
-
-	return -1
-}
-
-func renderRow(in *xlsx.Row, ctx interface{}) error {
-	return in.ForEachCell(func(cell *xlsx.Cell) error {
-		return renderCell(cell, ctx)
-	})
 }

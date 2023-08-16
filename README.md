@@ -3,16 +3,14 @@ Simple **.xlsx** (Excel XML document) template based document generator using ha
 
 Takes input **.xlsx** documents with mustache sippets in it and renders new document with snippets replaced by provided context.
 
-Thanks to `github.com/tealeg/xlsx` and `github.com/aymerick/raymond` for useful libs.
+Thanks to `github.com/qax-os/excelize` and `github.com/aymerick/raymond` for useful libs.
 
-[About package in russian](http://ivahaev.ru/go-xlsx-templater/)
-
-[Godoc](https://godoc.org/github.com/ivahaev/go-xlsx-templater)
+Inspired by `github.com/ivahaev/go-xlsx-templater`, but made some improvements to prevent style modifications in the result file.
 
 ## Installation
 
 ```
-    go get -u "github.com/ivahaev/go-xlsx-templater"
+    go get -u "github.com/krestkrest/go-xlsx-templater"
 ```
 
 ## Usage
@@ -20,13 +18,11 @@ Thanks to `github.com/tealeg/xlsx` and `github.com/aymerick/raymond` for useful 
 ### Import to your project
 
 ```go
-    import "github.com/ivahaev/go-xlsx-templater"
+    import "github.com/krestkrest/go-xlsx-templater"
 ```
 
 ### Prepare **template.xlsx** template.
-Filename may be any of course. For slices use dot notation `{{items.name}}`. When parser meets dot notation it will repeats contains row. If you need repeat few rows, or have nested slices, you can use range start `{{range groups}}` and `{{end}}`.
-
-![Sample document image](./template.png)
+For slices use dot notation `{{items.name}}`. When parser meets dot notation, it will repeat the contained row.
 
 ### Prepare context data
 
@@ -70,7 +66,7 @@ Filename may be any of course. For slices use dot notation `{{items.name}}`. Whe
 ```
 
 ### Read template, render with context and save to disk.
-Error processing omited in example.
+Error processing is omitted in example.
 
 ```go
     doc := xlst.New()
@@ -78,10 +74,6 @@ Error processing omited in example.
 	doc.Render(ctx)
 	doc.Save("./report.xlsx")
 ```
-
-### Enjoy created report
-
-![Report image](./report.png)
 
 ## Documentation
 
