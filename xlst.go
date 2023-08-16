@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"reflect"
 	"regexp"
@@ -51,9 +52,13 @@ func NewFromBinary(content []byte) (*Xlst, error) {
 
 // Render renders report and stores it in a struct
 func (m *Xlst) Render(in interface{}) error {
+	return m.RenderWithOptions(in)
+}
+
+func (m *Xlst) RenderWithOptions(in interface{}, opts ...Option) error {
 	ctx := getCtx(in)
 	for _, sheet := range m.file.GetSheetList() {
-		if err := m.renderRows(ctx, sheet); err != nil {
+		if err := m.renderRows(ctx, sheet, opts...); err != nil {
 			return fmt.Errorf("renderRows(%s): %w", sheet, err)
 		}
 	}
@@ -86,13 +91,13 @@ func (m *Xlst) Write(writer io.Writer) error {
 	return m.file.Write(writer)
 }
 
-func (m *Xlst) renderRows(ctx map[string]interface{}, sheet string) error {
+func (m *Xlst) renderRows(ctx map[string]interface{}, sheet string, opts ...Option) error {
 	rows, err := m.file.Rows(sheet)
 	if err != nil {
 		return fmt.Errorf("file.Rows: %w", err)
 	}
 
-	modifications, err := collectModifications(ctx, rows)
+	modifications, err := collectModifications(ctx, rows, opts...)
 	if err != nil {
 		_ = rows.Close()
 		return fmt.Errorf("collectModifications: %w", err)
@@ -152,9 +157,14 @@ func (m *Xlst) modifyCell(sheet string, column, row int, value string) error {
 	return nil
 }
 
-func collectModifications(ctx map[string]interface{}, rows *xls.Rows) (*Modifications, error) {
+func collectModifications(ctx map[string]interface{}, rows *xls.Rows, opts ...Option) (*Modifications, error) {
 	row := 0
 	result := NewModifications()
+
+	var options options
+	for _, opt := range opts {
+		opt(&options)
+	}
 
 	for rows.Next() {
 		row++
@@ -174,7 +184,7 @@ func collectModifications(ctx map[string]interface{}, rows *xls.Rows) (*Modifica
 					continue
 				}
 
-				value, err := cellModification(column, ctx)
+				value, err := cellModification(column, ctx, &options)
 				if err != nil {
 					return nil, fmt.Errorf("cellModification (%d, %d): %w", row, i+1, err)
 				}
@@ -210,7 +220,7 @@ func collectModifications(ctx map[string]interface{}, rows *xls.Rows) (*Modifica
 					continue
 				}
 
-				value, err := cellModification(column, ctx)
+				value, err := cellModification(column, ctx, &options)
 				if err != nil {
 					return nil, fmt.Errorf("cellModification (%d, %d): %w", modifiedRow, columnIndex+1, err)
 				}
@@ -228,7 +238,7 @@ func collectModifications(ctx map[string]interface{}, rows *xls.Rows) (*Modifica
 	return result, nil
 }
 
-func cellModification(value string, ctx interface{}) (string, error) {
+func cellModification(value string, ctx interface{}, opts *options) (string, error) {
 	if value == "" {
 		return value, nil
 	}
@@ -243,6 +253,9 @@ func cellModification(value string, ctx interface{}) (string, error) {
 	out, err := template.Exec(ctx)
 	if err != nil {
 		return "", fmt.Errorf("template.Exec: %w", err)
+	}
+	if opts.unescapeHTML {
+		out = html.UnescapeString(out)
 	}
 	return out, nil
 }
