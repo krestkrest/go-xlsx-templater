@@ -8,6 +8,7 @@ import (
 	"io"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -125,8 +126,28 @@ func (m *Xlst) modifyCells(sheet string, cellModifications []*CellModification) 
 }
 
 func (m *Xlst) insertRows(sheet string, rowInsertions map[int][]*RowInsertion) error {
-	for row, list := range rowInsertions {
+	if len(rowInsertions) == 0 {
+		return nil
+	}
+
+	keys := make([]int, 0, len(rowInsertions))
+	for key := range rowInsertions {
+		keys = append(keys, key)
+	}
+
+	if len(keys) > 1 {
+		sort.Slice(keys, func(i, j int) bool {
+			return keys[i] < keys[j]
+		})
+	}
+
+	for _, row := range keys {
+		list := rowInsertions[row]
+
 		if len(list) == 0 {
+			if err := m.file.RemoveRow(sheet, row); err != nil {
+				return fmt.Errorf("file.RemoveRow(%d): %w", row, err)
+			}
 			continue
 		}
 		for i := 1; i < len(list); i++ {
@@ -143,6 +164,7 @@ func (m *Xlst) insertRows(sheet string, rowInsertions map[int][]*RowInsertion) e
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -199,7 +221,7 @@ func collectModifications(ctx map[string]interface{}, rows *xls.Rows, opts ...Op
 			continue
 		}
 
-		modifiedRow := row + result.RowInsertionsTotal
+		modifiedRow := row + result.Offset
 
 		arr := reflect.ValueOf(ctx[listProperty])
 		arrBackup := ctx[listProperty]
@@ -231,6 +253,11 @@ func collectModifications(ctx map[string]interface{}, rows *xls.Rows, opts ...Op
 			}
 			result.AddRowInsertion(modifiedRow, rowInsertion)
 		}
+		if arr.Len() == 0 {
+			result.AddEmptyRowInsertion(modifiedRow)
+		}
+		result.Offset += arr.Len() - 1
+
 		ctx[listProperty] = arrBackup
 		ctx["Index"] = idxBackup
 	}

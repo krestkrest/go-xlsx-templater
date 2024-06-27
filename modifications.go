@@ -15,9 +15,9 @@ type RowInsertion struct {
 }
 
 type Modifications struct {
-	CellModifications  []*CellModification
-	RowInsertions      map[int][]*RowInsertion
-	RowInsertionsTotal int
+	CellModifications []*CellModification
+	RowInsertions     map[int][]*RowInsertion
+	Offset            int
 }
 
 func NewModifications() *Modifications {
@@ -30,5 +30,8 @@ func (m *Modifications) AddCellModification(cm *CellModification) {
 
 func (m *Modifications) AddRowInsertion(row int, ri *RowInsertion) {
 	m.RowInsertions[row] = append(m.RowInsertions[row], ri)
-	m.RowInsertionsTotal += 1
+}
+
+func (m *Modifications) AddEmptyRowInsertion(row int) {
+	m.RowInsertions[row] = []*RowInsertion{}
 }
